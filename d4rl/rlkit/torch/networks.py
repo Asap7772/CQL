@@ -63,15 +63,19 @@ class Mlp(nn.Module):
         self.last_fc.weight.data.uniform_(-init_w, init_w)
         self.last_fc.bias.data.uniform_(-init_w, init_w)
 
-    def forward(self, input, return_preactivations=False):
+    def forward(self, input, return_preactivations=False,return_flat_features=False):
         h = input
+        arr = []
         for i, fc in enumerate(self.fcs):
             h = fc(h)
             if self.layer_norm and i < len(self.fcs) - 1:
                 h = self.layer_norms[i](h)
             h = self.hidden_activation(h)
+            arr.append(h)
         preactivation = self.last_fc(h)
         output = self.output_activation(preactivation)
+        if return_flat_features:
+            return output, torch.cat(arr, 1).flatten()
         if return_preactivations:
             return output, preactivation
         else:

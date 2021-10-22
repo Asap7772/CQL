@@ -4,7 +4,7 @@ from rlkit.envs.wrappers import NormalizedBoxEnv
 from rlkit.launchers.launcher_util import setup_logger
 from rlkit.samplers.data_collector import MdpPathCollector, CustomMDPPathCollector
 from rlkit.torch.sac.policies import TanhGaussianPolicy, MakeDeterministic
-from rlkit.torch.sac.cql import CQLTrainer
+from rlkit.torch.sac.bc import BCTrainer
 from rlkit.torch.networks import FlattenMlp
 from rlkit.torch.torch_rl_algorithm import TorchBatchRLAlgorithm
 
@@ -14,44 +14,35 @@ import numpy as np
 import h5py
 import d4rl, gym
 
+from d4rl.locomotion import maze_env, ant, swimmer
+from d4rl.locomotion.wrappers import NormalizedBoxEnv
+
 def load_hdf5(dataset, replay_buffer):
     replay_buffer._observations = dataset['observations']
     replay_buffer._next_obs = dataset['next_observations']
     replay_buffer._actions = dataset['actions']
-    replay_buffer._rewards = np.expand_dims(np.squeeze(dataset['rewards']), 1)
-    replay_buffer._terminals = np.expand_dims(np.squeeze(dataset['terminals']), 1)  
+    # Center reward for Ant-Maze
+    replay_buffer._rewards = (np.expand_dims(dataset['rewards'], 1) - 0.5)*4.0
+    replay_buffer._terminals = np.expand_dims(dataset['terminals'], 1)  
     replay_buffer._size = dataset['terminals'].shape[0]
     print ('Number of terminals on: ', replay_buffer._terminals.sum())
     replay_buffer._top = replay_buffer._size
 
 def experiment(variant):
-    eval_env = gym.make(variant['env_name'])
+
+    if args.env == 'Ant':
+        print('MAZE', maze)
+        eval_env = NormalizedBoxEnv(ant.AntMazeEnv(maze_map=maze, maze_size_scaling=4.0, non_zero_reset=args.multi_start))
+    elif args.env == 'Swimmer':
+        eval_env = NormalizedBoxEnv(swimmer.SwimmerMazeEnv(mmaze_map=maze, maze_size_scaling=4.0, non_zero_reset=args.multi_start))
+    else:
+        eval_env = gym.make(variant['env_name'])
     expl_env = eval_env
     
     obs_dim = expl_env.observation_space.low.size
     action_dim = eval_env.action_space.low.size
 
     M = variant['layer_size']
-    qf1 = FlattenMlp(
-        input_size=obs_dim + action_dim,
-        output_size=1,
-        hidden_sizes=[M, M, M],
-    )
-    qf2 = FlattenMlp(
-        input_size=obs_dim + action_dim,
-        output_size=1,
-        hidden_sizes=[M, M, M],
-    )
-    target_qf1 = FlattenMlp(
-        input_size=obs_dim + action_dim,
-        output_size=1,
-        hidden_sizes=[M, M, M],
-    )
-    target_qf2 = FlattenMlp(
-        input_size=obs_dim + action_dim,
-        output_size=1,
-        hidden_sizes=[M, M, M],
-    )
     policy = TanhGaussianPolicy(
         obs_dim=obs_dim,
         action_dim=action_dim,
@@ -74,27 +65,14 @@ def experiment(variant):
         expl_env,
     )
     if variant['load_buffer'] and buffer_filename is not None:
-        replay_buffer.load_buffer(buffer_filename)
-    elif 'random-expert' in variant['env_name']:
-        load_hdf5(d4rl.basic_dataset(eval_env), replay_buffer) 
+        dataset = np.load(buffer_filename)
+        load_hdf5(dataset, replay_buffer)
     else:
-        load_hdf5(d4rl.qlearning_dataset(eval_env), replay_buffer)
+        assert False
        
-    trainer = CQLTrainer(
+    trainer = BCTrainer(
         env=eval_env,
         policy=policy,
-        qf1=qf1,
-        qf2=qf2,
-        target_qf1=target_qf1,
-        target_qf2=target_qf2,
-        modify_grad=variant['modify_grad'],
-        modify_type=variant['modify_type'],
-        orthogonalize_grads=variant['orthogonalize_grads'],
-        modify_func=variant['modify_func'],
-        modify_func_type=variant['modify_func_type'],
-        modify_func_const=variant['modify_func_const'],
-        orthog_start=variant['orthog_start'],
-        moving_mfconst = variant['moving_mfconst'],
         **variant['trainer_kwargs']
     )
     algorithm = TorchBatchRLAlgorithm(
@@ -104,7 +82,7 @@ def experiment(variant):
         exploration_data_collector=expl_path_collector,
         evaluation_data_collector=eval_path_collector,
         replay_buffer=replay_buffer,
-        eval_both=True,
+        eval_both=False,
         batch_rl=variant['load_buffer'],
         **variant['algorithm_kwargs']
     )
@@ -148,7 +126,7 @@ if __name__ == "__main__":
             policy_eval_start=40000,
             num_qs=2,
 
-            # min Q
+            # CQL
             temp=1.0,
             min_q_version=3,
             min_q_weight=1.0,
@@ -165,55 +143,62 @@ if __name__ == "__main__":
     )
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", type=str, default='hopper-medium-v0')
-    parser.add_argument("--name", type=str, default='test')
+    parser.add_argument("--env", type=str, default='HalfCheetah-v2')
     parser.add_argument("--gpu", default='0', type=str)
     parser.add_argument("--max_q_backup", type=str, default="False")          # if we want to try max_{a'} backups, set this to true
     parser.add_argument("--deterministic_backup", type=str, default="True")   # defaults to true, it does not backup entropy in the Q-function, as per Equation 3
     parser.add_argument("--policy_eval_start", default=40000, type=int)       # Defaulted to 20000 (40000 or 10000 work similarly)
-    parser.add_argument("--orthog_start", default=40000, type=int)
     parser.add_argument('--min_q_weight', default=1.0, type=float)            # the value of alpha, set to 5.0 or 10.0 if not using lagrange
     parser.add_argument('--policy_lr', default=1e-4, type=float)              # Policy learning rate
     parser.add_argument('--min_q_version', default=3, type=int)               # min_q_version = 3 (CQL(H)), version = 2 (CQL(rho)) 
     parser.add_argument('--lagrange_thresh', default=5.0, type=float)         # the value of tau, corresponds to the CQL(lagrange) version
-    parser.add_argument("--seed", default=10, type=int)       
-    parser.add_argument('--modify_grad', action='store_true')
-    parser.add_argument('--modify_type', default=None, type=str)
-    parser.add_argument('--orthogonalize_grads', action='store_true')
-    parser.add_argument('--modify_func', action='store_true')
-    parser.add_argument('--modify_func_type', default=None, type=str)
-    parser.add_argument('--modify_func_const', default=1, type=float) 
-    parser.add_argument('--moving_mfconst', action='store_true') 
-    
+    parser.add_argument('--seed', default=10, type=int)
+    parser.add_argument('--load_buffer', action='store_true')
+    parser.add_argument('--buffer_filename', type=str, default=None)
+    parser.add_argument('--multi_start', action='store_true', help='Noisy actions')
+    parser.add_argument('--maze', type=str, default='umaze', help='Maze type. umaze, medium, or large')
 
     args = parser.parse_args()
-    enable_gpus(args.gpu)
+
+    if args.maze == 'umaze':
+        maze = maze_env.U_MAZE
+    elif args.maze == 'medium':
+        maze = maze_env.BIG_MAZE
+    elif args.maze == 'large':
+        maze = maze_env.HARDEST_MAZE
+    elif args.maze == 'umaze_eval':
+        maze = maze_env.U_MAZE_EVAL
+    elif args.maze == 'medium_eval':
+        maze = maze_env.BIG_MAZE_EVAL
+    elif args.maze == 'large_eval':
+        maze = maze_env.HARDEST_MAZE_EVAL
+    elif args.maze == 'medium_test':
+        maze = maze_env.BIG_MAZE_TEST
+    elif args.maze == 'large_test':
+        maze = maze_env.HARDEST_MAZE_TEST
+    else:
+        raise NotImplementedError
+
+    print(args)
+    # enable_gpus(args.gpu)
     variant['trainer_kwargs']['max_q_backup'] = (True if args.max_q_backup == 'True' else False)
     variant['trainer_kwargs']['deterministic_backup'] = (True if args.deterministic_backup == 'True' else False)
     variant['trainer_kwargs']['min_q_weight'] = args.min_q_weight
     variant['trainer_kwargs']['policy_lr'] = args.policy_lr
     variant['trainer_kwargs']['min_q_version'] = args.min_q_version
+    variant['trainer_kwargs']['temp'] = 1.0
     variant['trainer_kwargs']['policy_eval_start'] = args.policy_eval_start
     variant['trainer_kwargs']['lagrange_thresh'] = args.lagrange_thresh
-    variant['modify_grad'] = args.modify_grad
-    variant['modify_type'] = args.modify_type
-    variant['moving_mfconst'] = args.moving_mfconst
-
-    variant['modify_func'] = args.modify_func
-    variant['modify_func_type'] = args.modify_func_type
-    variant['modify_func_const'] = args.modify_func_const
-    variant['orthogonalize_grads'] = args.orthogonalize_grads
-    variant['orthog_start'] = args.orthog_start
     if args.lagrange_thresh < 0.0:
         variant['trainer_kwargs']['with_lagrange'] = False
     
-    variant['buffer_filename'] = None
+    variant['buffer_filename'] = args.buffer_filename
 
-    variant['load_buffer'] = True
+    variant['load_buffer'] = args.load_buffer
     variant['env_name'] = args.env
     variant['seed'] = args.seed
 
     rnd = np.random.randint(0, 1000000)
-    setup_logger(os.path.join(args.name, str(rnd)), variant=variant, base_log_dir='/nfs/kun1/users/asap7772/d4rl_exps_post')
-    ptu.set_gpu_mode(True)
+    setup_logger(os.path.join('BC_offline_antmaze_runs', str(rnd)), variant=variant, base_log_dir='./data')
+    # ptu.set_gpu_mode(True)
     experiment(variant)
